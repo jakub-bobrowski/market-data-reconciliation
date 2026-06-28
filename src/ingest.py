@@ -1,17 +1,17 @@
 """Data ingestion: CSV loading, API fetching, data normalization, and Supabase upsert.
 
 Pipeline flow for a single instrument (e.g. SPY):
-1. load_sample_csv() or load_uploaded_csv()  → raw DataFrame from CSV file
-2. normalize_data()                          → cleaned DataFrame (snake_case columns,
-                                               correct types, symbol column added)
-3. get_date_range()                          → (start_date, end_date) extracted from
-                                               normalized DataFrame, passed to API fetch
-4. fetch_api_data()                          → raw DataFrame from Alpha Vantage API
-                                               filtered to exact CSV date range
-5. normalize_data()                          → same normalization applied to API data
-6. upsert_to_supabase()                      → INSERT ... ON CONFLICT (symbol, date)
-                                               DO UPDATE: inserts new rows, overwrites
-                                               existing ones - no duplicates on re-run
+1. load_sample_csv(filepath) or load_uploaded_csv() → raw DataFrame from CSV file
+2. normalize_data()                                 → cleaned DataFrame (snake_case columns,
+                                                    correct types, symbol column added)
+3. get_date_range()                                 → (start_date, end_date) extracted from
+                                                    normalized DataFrame, passed to API fetch
+4. fetch_api_data()                                 → raw DataFrame from Alpha Vantage API
+                                                    filtered to exact CSV date range
+5. normalize_data()                                 → same normalization applied to API data
+6. upsert_to_supabase()                             → INSERT ... ON CONFLICT (symbol, date)
+                                                    DO UPDATE: inserts new rows, overwrites
+                                                    existing ones - no duplicates on re-run
 """
 
 from datetime import date
@@ -34,17 +34,36 @@ COLUMN_RENAME = {
     "Volume": "volume",
 }
 
-def load_sample_csv(symbol: str) -> pd.DataFrame:
-    """Load a bundled sample CSV from data/ by symbol (case-insensitive glob match).
+def load_sample_csv(filepath: Path) -> pd.DataFrame:
+    """Load a CSV file by explicit path. Returns a raw DataFrame (not yet normalized)."""
+    return pd.read_csv(filepath)
 
-    Returns a raw DataFrame with original column names (not yet normalized).
-    Normalization happens separately in normalize_data().
+
+def symbol_from_path(filepath: Path) -> str:
+    """Extract ticker symbol from a filename stem: 'spy_us_d.csv' → 'SPY'."""
+    return filepath.stem.split("_")[0].upper()
+
+
+def scan_csv_catalog() -> list[dict]:
+    """Scan data/ for all CSV files and return one catalog entry per file.
+
+    Each entry: {path, symbol, df (normalized), start, end, label}.
+    Adding a new CSV to data/ automatically makes it appear in the UI.
     """
-    # "*spy*" matches "spy_stooq.csv", "spy_us_d.csv", etc.
-    matches = list(DATA_DIR.glob(f"*{symbol.lower()}*"))
-    if not matches:
-        raise FileNotFoundError(f"No sample CSV found for symbol '{symbol}' in {DATA_DIR}")
-    return pd.read_csv(matches[0])
+    catalog = []
+    for path in sorted(DATA_DIR.glob("*.csv")):
+        symbol = symbol_from_path(path)
+        df = normalize_data(load_sample_csv(path), symbol, "stooq")
+        start, end = get_date_range(df)
+        catalog.append({
+            "path": path,
+            "symbol": symbol,
+            "df": df,
+            "start": start,
+            "end": end,
+            "label": f"{symbol} · {start} to {end} ({path.name})",
+        })
+    return catalog
 
 
 def normalize_data(df: pd.DataFrame, symbol: str, source: str) -> pd.DataFrame:
