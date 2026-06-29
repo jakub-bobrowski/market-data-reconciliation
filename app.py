@@ -2,7 +2,15 @@
 
 import streamlit as st
 
-from src.ingest import fetch_api_data, upsert_to_supabase, scan_csv_catalog
+from src.ingest import (
+    fetch_api_data,
+    get_date_range,
+    load_uploaded_csv,
+    normalize_data,
+    scan_csv_catalog,
+    symbol_from_filename,
+    upsert_to_supabase,
+)
 
 # ── Page config ──────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -87,7 +95,39 @@ with tab1:
             "Compatible sources: stooq.com / any provider with daily OHLCV data."
         )
         if uploaded_file is not None:
-            st.info("CSV upload processing will be available in the next update.")
+            guessed = symbol_from_filename(uploaded_file.name)
+            symbol_input = st.text_input(
+                "Ticker symbol",
+                value=guessed,
+                max_chars=10,
+                help="Guessed from the filename. Override if incorrect (e.g. AAPL, SPY).",
+            ).strip().upper()
+
+            if symbol_input:
+                try:
+                    df_raw = load_uploaded_csv(uploaded_file)
+                    df_csv = normalize_data(df_raw, symbol_input, "stooq")
+                    start_date, end_date = get_date_range(df_csv)
+                    symbol = symbol_input
+
+                    st.success(
+                        f"✅ Ready · {symbol} · {len(df_csv)} rows · {start_date} to {end_date}"
+                    )
+
+                    st.session_state["symbol"]     = symbol
+                    st.session_state["start_date"] = start_date
+                    st.session_state["end_date"]   = end_date
+                    st.session_state["df_csv"]     = df_csv
+
+                except KeyError as exc:
+                    st.error(
+                        f"❌ Missing column {exc}. "
+                        "Expected: Date, Open, High, Low, Close, Volume (case-insensitive)."
+                    )
+                except Exception as exc:
+                    st.error(f"❌ Could not parse CSV: {exc}")
+            else:
+                st.info("Enter the ticker symbol above to continue.")
 
     st.divider()
 

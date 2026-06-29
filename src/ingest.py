@@ -8,8 +8,7 @@ Pipeline flow for a single instrument (e.g. SPY):
                                                     normalized DataFrame, passed to API fetch
 4. fetch_api_data()                                 → raw DataFrame from Alpha Vantage API
                                                     (compact = last ~100 trading days, free tier)
-                                                    filtered to exact CSV date range
-5. normalize_data()                                 → same normalization applied to API data
+5. normalize_data()                                 → same normalization applied to API data   
 6. upsert_to_supabase()                             → INSERT ... ON CONFLICT (symbol, date)
                                                     DO UPDATE: inserts new rows, overwrites
                                                     existing ones - no duplicates on re-run
@@ -53,6 +52,25 @@ def load_sample_csv(filepath: Path) -> pd.DataFrame:
     return pd.read_csv(filepath)
 
 
+def load_uploaded_csv(uploaded_file) -> pd.DataFrame:
+    """Load a CSV from a Streamlit UploadedFile object. Returns a raw DataFrame.
+
+    UploadedFile is a file-like object so pd.read_csv() handles it directly.
+    Normalization happens separately in normalize_data().
+    """
+    return pd.read_csv(uploaded_file)
+
+
+def symbol_from_filename(filename: str) -> str:
+    """Best-effort ticker extraction from an uploaded filename.
+
+    'aapl_us_d.csv' → 'AAPL', 'SPY.csv' → 'SPY', 'my_data.csv' → 'MY'.
+    Returns empty string when the stem is blank so the caller can prompt the user.
+    """
+    stem = Path(filename).stem.split("_")[0].strip()
+    return stem.upper() if stem else ""
+
+
 def symbol_from_path(filepath: Path) -> str:
     """Extract ticker symbol from a filename stem: 'spy_us_d.csv' → 'SPY'."""
     return filepath.stem.split("_")[0].upper()
@@ -86,10 +104,10 @@ def fetch_api_data(
     end_date: date,
     api_key: str,
 ) -> pd.DataFrame:
-    """Fetch TIME_SERIES_DAILY from Alpha Vantage, filter to [start_date, end_date], normalize.
+    """Fetch TIME_SERIES_DAILY from Alpha Vantage, filter to [start_date, end_date] passed from CSV, normalize.
 
     Uses outputsize=compact (free tier) which covers only the last ~100 trading days
-    (~4 months). Sample CSV files should cover a matching recent date range so that
+    (~4 months). CSV files should cover a matching recent date range so that
     the date-range filter returns a non-empty result.
 
     Args:
