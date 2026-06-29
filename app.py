@@ -2,7 +2,7 @@
 
 import streamlit as st
 
-from src.ingest import upsert_to_supabase, scan_csv_catalog
+from src.ingest import fetch_api_data, upsert_to_supabase, scan_csv_catalog
 
 # ── Page config ──────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -21,8 +21,9 @@ with st.sidebar:
         "and the Alpha Vantage API for the same instrument and date range."
     )
 
-# Read Supabase connection string from .streamlit/secrets.toml
+# Read credentials from .streamlit/secrets.toml either locally or in Streamlit Cloud (Settings / Secrets). The file is not checked into GitHub.
 conn_str = st.secrets["supabase"]["connection_string"]
+api_key = st.secrets["alphavantage"]["api_key"]
 
 
 # ── Cached loader: avoids re-reading CSVs on every Streamlit rerun ────────────
@@ -110,9 +111,34 @@ with tab1:
         with st.status("Running pipeline...", expanded=True) as pipeline_status:
             # Step 1 – upsert CSV data into raw_stooq
             rows_csv = upsert_to_supabase(_df_csv, "raw_stooq", conn_str)
-            st.write(f"✅ CSV loaded to database · {rows_csv} rows")
+            st.write(f"✅ Step 1 · CSV loaded to database · {rows_csv} rows")
 
-            # Steps 2 (API) and 3 (Reconciliation) will be added in later stages of the project
+            # Step 2 – fetch Alpha Vantage data and upsert into raw_alphavantage
+            # (compact = last ~100 trading days; sample CSV must cover a recent date range)
+            try:
+                df_api = fetch_api_data(
+                    st.session_state["symbol"],
+                    st.session_state["start_date"],
+                    st.session_state["end_date"],
+                    api_key,
+                )
+            except RuntimeError as exc:
+                st.error(f"❌ API fetch failed: {exc}")
+                pipeline_status.update(label="Pipeline failed", state="error")
+                st.stop()
+
+            rows_api = upsert_to_supabase(df_api, "raw_alphavantage", conn_str)
+            st.write(f"✅ Step 2 · API data loaded to database · {rows_api} rows")
+
+            # Row count mismatch between CSV and API is expected on holidays/weekends
+            # that differ between sources, but flag it so the user is aware.
+            if rows_api != rows_csv:
+                st.warning(
+                    f"⚠️ Row count mismatch · CSV: {rows_csv} rows · API: {rows_api} rows "
+                    f"(CSV date range depends on the loaded file; API always returns the last ~100 trading days)"
+                )
+
+            # Step 3 – Reconciliation will be added in the next slice
             pipeline_status.update(label="Pipeline complete", state="complete", expanded=True)
 
 

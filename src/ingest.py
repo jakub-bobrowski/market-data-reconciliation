@@ -7,6 +7,7 @@ Pipeline flow for a single instrument (e.g. SPY):
 3. get_date_range()                                 → (start_date, end_date) extracted from
                                                     normalized DataFrame, passed to API fetch
 4. fetch_api_data()                                 → raw DataFrame from Alpha Vantage API
+                                                    (compact = last ~100 trading days, free tier)
                                                     filtered to exact CSV date range
 5. normalize_data()                                 → same normalization applied to API data
 6. upsert_to_supabase()                             → INSERT ... ON CONFLICT (symbol, date)
@@ -18,8 +19,21 @@ from datetime import date
 from pathlib import Path
 
 import pandas as pd
+import requests
 from psycopg2.extras import execute_values
 from sqlalchemy import create_engine
+
+AV_BASE_URL = "https://www.alphavantage.co/query"
+
+# Alpha Vantage TIME_SERIES_DAILY column names → stooq-compatible names
+# that normalize_data() already knows how to handle.
+AV_COLUMN_RENAME = {
+    "1. open": "Open",
+    "2. high": "High",
+    "3. low": "Low",
+    "4. close": "Close",
+    "5. volume": "Volume",
+}
 
 # Always finds the data/ folder regardless of where this script is run from.
 DATA_DIR = Path(__file__).parent.parent / "data"
@@ -64,6 +78,71 @@ def scan_csv_catalog() -> list[dict]:
             "label": f"{symbol} · {start} to {end} ({path.name})",
         })
     return catalog
+
+
+def fetch_api_data(
+    symbol: str,
+    start_date: date,
+    end_date: date,
+    api_key: str,
+) -> pd.DataFrame:
+    """Fetch TIME_SERIES_DAILY from Alpha Vantage, filter to [start_date, end_date], normalize.
+
+    Uses outputsize=compact (free tier) which covers only the last ~100 trading days
+    (~4 months). Sample CSV files should cover a matching recent date range so that
+    the date-range filter returns a non-empty result.
+
+    Args:
+        symbol:     Ticker symbol, e.g. 'AAPL'.
+        start_date: First date to include (inclusive) — matched to the CSV date range.
+        end_date:   Last date to include (inclusive) — matched to the CSV date range.
+        api_key:    Alpha Vantage API key from .streamlit/secrets.toml.
+
+    Returns:
+        Normalized DataFrame ready for upsert_to_supabase(). May be empty if the
+        CSV date range falls outside the last ~100 trading days.
+
+    Raises:
+        RuntimeError: On API rate limit, invalid key/symbol, or missing data.
+        requests.HTTPError: On HTTP-level failures (4xx/5xx).
+    """
+    response = requests.get(
+        AV_BASE_URL,
+        params={
+            "function": "TIME_SERIES_DAILY",
+            "symbol": symbol,
+            "outputsize": "compact",  # free tier: last ~100 trading days (~4 months)
+            "apikey": api_key,
+        },
+        timeout=30,
+    )
+    response.raise_for_status()
+    payload = response.json()
+
+    # Alpha Vantage signals soft errors in the JSON body, not via HTTP status codes.
+    if "Note" in payload or "Information" in payload:
+        msg = payload.get("Note") or payload.get("Information")
+        raise RuntimeError(f"Alpha Vantage rate limit reached: {msg}")
+    if "Error Message" in payload:
+        raise RuntimeError(f"Alpha Vantage error: {payload['Error Message']}")
+
+    time_series = payload.get("Time Series (Daily)")
+    if not time_series:
+        raise RuntimeError(f"Alpha Vantage returned no time series data for '{symbol}'.")
+
+    # Build DataFrame from the nested dict: date-string → {1. open: ..., ...}
+    df = pd.DataFrame.from_dict(time_series, orient="index")
+    df.index.name = "Date"
+    df = df.reset_index()
+
+    # Rename to stooq-compatible column names so normalize_data() works unchanged.
+    df = df.rename(columns=AV_COLUMN_RENAME)
+
+    df = normalize_data(df, symbol, "alphavantage")
+
+    # Filter to the exact date range from the loaded CSV.
+    df = df[(df["date"] >= start_date) & (df["date"] <= end_date)]
+    return df.sort_values("date").reset_index(drop=True)
 
 
 def normalize_data(df: pd.DataFrame, symbol: str, source: str) -> pd.DataFrame:
