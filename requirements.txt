@@ -4,4 +4,5 @@ psycopg2-binary
 streamlit
 requests
 openpyxl
+plotly
 

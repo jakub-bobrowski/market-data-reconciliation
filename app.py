@@ -1,12 +1,17 @@
 """Market Data Reconciliation – Streamlit application entry point."""
 
+import pandas as pd
+import plotly.express as px
 import streamlit as st
 
 from src.ingest import (
     fetch_api_data,
+    get_date_bounds,
     get_date_range,
+    get_distinct_symbols,
     load_uploaded_csv,
     normalize_data,
+    query_ohlcv,
     scan_csv_catalog,
     symbol_from_filename,
     upsert_to_supabase,
@@ -182,9 +187,87 @@ with tab1:
             pipeline_status.update(label="Pipeline complete", state="complete", expanded=True)
 
 
-# ── TAB 2: Data Explorer (placeholder) ─────────────────────────────
+# ── TAB 2: Data Explorer ────────────────────────────────────────────
+# Three dependent filters: DB source → symbol (queried from source) → date range (min/max from source for a given symbol)
 with tab2:
-    st.info("Run the pipeline first to populate the database, then explore the raw data here.")
+    st.subheader("Raw Data Explorer")
+
+    col_src, col_sym, col_dates = st.columns([1.2, 1, 2])
+
+    # Step 1 – source: static dropdown; user selects which raw table to query from DB
+    with col_src:
+        source_table = st.selectbox(
+            "Source",
+            options=["raw_stooq", "raw_alphavantage"],
+            format_func=lambda x: "CSV · stooq" if x == "raw_stooq" else "API · Alpha Vantage",
+        )
+
+    # Step 2 – symbol: dynamic dropdown from DB; depends on source_table (Step 1)
+    available_symbols = get_distinct_symbols(source_table, conn_str)
+
+    if not available_symbols:
+        st.info("Run the pipeline first")
+    else:
+        with col_sym:
+            symbol_filter = st.selectbox("Symbol", options=available_symbols)
+
+        # Step 3 – date range: bounds from DB for selected symbol; depends on Step 2
+        min_date, max_date = get_date_bounds(source_table, symbol_filter, conn_str)
+
+        with col_dates:
+            # Default to full available range; min/max prevent selecting dates outside the DB
+            date_range = st.date_input(
+                "Date range",
+                value=(min_date, max_date),
+                min_value=min_date,
+                max_value=max_date,
+            )
+
+        start_filter = date_range[0] if len(date_range) >= 1 else None
+        end_filter = date_range[1] if len(date_range) >= 2 else None
+
+        try:
+            df_view = query_ohlcv(
+                source_table,
+                conn_str,
+                symbol=symbol_filter,
+                start_date=start_filter,
+                end_date=end_filter,
+            )
+        except Exception as exc:
+            st.error(f"❌ Query failed: {exc}")
+            df_view = pd.DataFrame()
+
+        # Empty result is unlikely (date range comes from DB bounds) but handled defensively
+        if df_view.empty:
+            st.info("No rows found — adjust the date range.")
+        else:
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("Rows", f"{len(df_view):,}")
+            m2.metric("Symbol", symbol_filter)
+            m3.metric("From", str(df_view["date"].min()))
+            m4.metric("To", str(df_view["date"].max()))
+
+            fig = px.line(df_view, x="date", y="close_price", title=f"{symbol_filter} – Close Price")
+            st.plotly_chart(fig, use_container_width=True)
+
+            display_cols = ["date", "symbol", "open_price", "high_price", "low_price",
+                            "close_price", "volume", "loaded_at"]
+            st.dataframe(
+                df_view[display_cols],
+                use_container_width=True,
+                hide_index=True, 
+                column_config={
+                    "date": st.column_config.DateColumn("Date"),
+                    "symbol": st.column_config.TextColumn("Symbol"),
+                    "open_price": st.column_config.NumberColumn("Open", format="%.4f"),
+                    "high_price": st.column_config.NumberColumn("High", format="%.4f"),
+                    "low_price": st.column_config.NumberColumn("Low", format="%.4f"),
+                    "close_price": st.column_config.NumberColumn("Close", format="%.4f"),
+                    "volume": st.column_config.NumberColumn("Volume", format="%d"),
+                    "loaded_at": st.column_config.DatetimeColumn("Loaded At"),
+                },
+            )
 
 
 # ── TAB 3: About & SQL (placeholder) ───────────────────────────────

@@ -20,7 +20,7 @@ from pathlib import Path
 import pandas as pd
 import requests
 from psycopg2.extras import execute_values
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 
 AV_BASE_URL = "https://www.alphavantage.co/query"
 
@@ -273,6 +273,72 @@ def upsert_to_supabase(
                 """,
                 rows,
             )
-        conn.commit() 
+        conn.commit()
 
     return len(rows)
+
+
+def get_distinct_symbols(table_name: str, connection_string: str) -> list[str]:
+    """Return a sorted list of unique symbols present in the given table."""
+    sql = text(f"SELECT DISTINCT symbol FROM {table_name} ORDER BY symbol")
+    engine = create_engine(connection_string)
+    with engine.connect() as conn:
+        result = conn.execute(sql)
+        # symbol result rows are tuples with one element each: [("AAPL",), ("QQQ",), ("SPY",)] 
+        # → extract first element from these tuples to get plain strings ["AAPL", "QQQ", "SPY"] 
+        return [row[0] for row in result]
+
+
+def get_date_bounds(
+    table_name: str, symbol: str, connection_string: str
+) -> tuple[date, date]: 
+    """Return (min_date, max_date) for a given symbol in the given table."""
+    sql = text(
+        f"SELECT MIN(date), MAX(date) FROM {table_name} WHERE symbol = :symbol"
+    )
+    engine = create_engine(connection_string)
+    with engine.connect() as conn:
+        result = conn.execute(sql, {"symbol": symbol})
+        row = result.fetchone()
+        return row[0], row[1]
+
+
+def query_ohlcv(
+    table_name: str,
+    connection_string: str,
+    symbol: str | None = None,
+    start_date: date | None = None,
+    end_date: date | None = None,
+) -> pd.DataFrame:
+    """Query OHLCV rows from raw_stooq or raw_alphavantage with optional filters.
+
+    Args:
+        table_name:        'raw_stooq' or 'raw_alphavantage' — always a hardcoded
+                           UI value (from dropdown menu), never user input, so the f-string is safe.
+        connection_string: PostgreSQL URI from .streamlit/secrets.toml.
+        symbol:            Filter by ticker (case-insensitive). None → all symbols.
+        start_date:        Inclusive lower bound on date. None → no lower bound.
+        end_date:          Inclusive upper bound on date. None → no upper bound.
+
+    Returns:
+        DataFrame sorted by date ascending. Empty DataFrame when no rows match.
+    """
+    conditions: list[str] = []
+    params = {}
+
+    if symbol:
+        conditions.append("symbol = :symbol")
+        params["symbol"] = symbol.upper()
+    if start_date:
+        conditions.append("date >= :start_date")
+        params["start_date"] = start_date
+    if end_date:
+        conditions.append("date <= :end_date")
+        params["end_date"] = end_date
+
+    where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+    sql = text(f"SELECT * FROM {table_name} {where} ORDER BY date")
+
+    engine = create_engine(connection_string)
+    with engine.connect() as conn:
+        return pd.read_sql(sql, conn, params=params)
